@@ -576,7 +576,11 @@ export default function App() {
 
       {!isConnected ? (
         <section className="card simple-card">
-          <h2>Connect a manager wallet</h2>
+          <h2>Vault manager dashboard</h2>
+          <p className="muted">
+            PeerVaults is a management dashboard for Peer.xyz vault managers. Connect the manager wallet to review
+            delegated deposits, update rates, and manage vault settings from one place.
+          </p>
         </section>
       ) : vaultsQuery.isLoading ? (
         <section className="card simple-card">
