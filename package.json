@@ -1,0 +1,31 @@
+{
+  "name": "peer-vault-scripts",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "create:vault": "tsx scripts/create-vault.ts"
+  },
+  "dependencies": {
+    "@tanstack/query-core": "^5.62.7",
+    "@tanstack/react-query": "^5.62.7",
+    "@zkp2p/sdk": "^0.2.3",
+    "dotenv": "^17.2.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "viem": "^2.38.5",
+    "wagmi": "^3.5.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.3"
+  },
+  "packageManager": "pnpm@10.31.0+sha512.e3927388bfaa8078ceb79b748ffc1e8274e84d75163e67bc22e06c0d3aed43dd153151cbf11d7f8301ff4acb98c68bdc5cadf6989532801ffafe3b3e4a63c268"
+}
