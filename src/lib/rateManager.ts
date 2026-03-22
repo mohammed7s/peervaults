@@ -27,6 +27,13 @@ export function rateInputToPreciseUnits(rateInput: string) {
   return parseUnits(rateInput || '0', 18);
 }
 
+export function applyMarkupPercentToRate(rateInput: string, markupPercent: string) {
+  const baseRate = rateInputToPreciseUnits(rateInput || '0');
+  const markupWad = percentToWad(markupPercent || '0');
+  const adjustedRate = (baseRate * (10n ** 18n + markupWad)) / 10n ** 18n;
+  return formatRate(adjustedRate);
+}
+
 export function groupQueuedRates<T extends { paymentMethodHash: Hex; currencyHash: Hex; rate: bigint }>(
   items: T[],
 ) {

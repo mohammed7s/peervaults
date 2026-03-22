@@ -18,9 +18,11 @@ import {
 } from 'wagmi';
 import { base } from 'wagmi/chains';
 import { formatUnits, type Address, type Hex } from 'viem';
+import peerVaultsLogo from './assets/peervaults-logo.svg';
 import { appConfig } from './lib/config';
 import {
   RATE_MANAGER_ABI,
+  applyMarkupPercentToRate,
   formatPercentFromWad,
   formatRate,
   groupQueuedRates,
@@ -36,6 +38,13 @@ type VaultConfig = {
   minLiquidity: bigint;
   name: string;
   uri: string;
+};
+type PublicVaultListItem = {
+  manager: DiscoveredVault;
+  aggregate: {
+    currentDelegatedBalance?: string | null;
+    currentDelegatedDeposits?: number | string | null;
+  } | null;
 };
 
 type TxResult = {
@@ -65,11 +74,15 @@ type MarketRatesResponse = {
 type RateEditorRow = {
   id: string;
   paymentMethod: PaymentMethodKey | '';
+  originalPaymentMethod: PaymentMethodKey | '';
   currencyCode: string;
+  originalCurrencyCode: string;
   originalRateInput: string;
   rateInput: string;
+  markupPercentInput: string;
   updatedAt?: string;
   isNew: boolean;
+  usesMarketPricing: boolean;
 };
 type ManagedDeposit = {
   id: string;
@@ -79,12 +92,17 @@ type ManagedDeposit = {
   delegatedAt?: string | null;
   updatedAt?: string | null;
 };
+type MarketAdjustedRateResult =
+  | { ok: true; rateInput: string }
+  | { ok: false; error: string };
+type VaultMarkupMap = Record<string, string>;
 
 const paymentOptions = Object.entries(PLATFORM_METADATA)
   .map(([key, value]) => ({ key: key as PaymentMethodKey, label: value.displayName }))
   .sort((a, b) => a.label.localeCompare(b.label));
 const currencyOptions = Object.keys(currencyInfo).sort();
 const defaultCurrency = currencyOptions.includes('USD') ? 'USD' : (currencyOptions[0] ?? 'USD');
+const majorCurrencyCodes = ['USD', 'EUR', 'GBP'].filter((currencyCode) => currencyOptions.includes(currencyCode));
 const marketRateSourceUrl = 'https://api.coinbase.com/v2/exchange-rates?currency=USDC';
 const paymentMethodLookup = new Map(
   paymentOptions.map((option) => [
@@ -116,10 +134,26 @@ function normalizeCurrencyCode(value?: string) {
 }
 
 function formatUpdatedAt(value?: string) {
-  if (!value) return 'Recent';
-  const timestamp = Date.parse(value);
-  if (Number.isNaN(timestamp)) return 'Recent';
-  return new Date(timestamp).toLocaleDateString();
+  if (!value) return '--';
+  const trimmedValue = value.trim();
+  const numericValue = Number(trimmedValue);
+  const timestamp = Number.isFinite(numericValue) && trimmedValue !== ''
+    ? (trimmedValue.length <= 10 ? numericValue * 1000 : numericValue)
+    : Date.parse(trimmedValue);
+  if (Number.isNaN(timestamp)) return '--';
+
+  const updatedDate = new Date(timestamp);
+  const now = new Date();
+  const includeYear = updatedDate.getFullYear() !== now.getFullYear();
+
+  return new Intl.DateTimeFormat(undefined, {
+    day: '2-digit',
+    month: 'short',
+    ...(includeYear ? { year: 'numeric' } : {}),
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(updatedDate);
 }
 
 function formatLiquidity(value?: string) {
@@ -136,13 +170,47 @@ function createRateRow(overrides: Partial<RateEditorRow> = {}): RateEditorRow {
   return {
     id: `rate-row-${rateRowCounter++}`,
     paymentMethod: '',
+    originalPaymentMethod: '',
     currencyCode: '',
+    originalCurrencyCode: '',
     originalRateInput: '',
     rateInput: '',
+    markupPercentInput: '0',
     updatedAt: '',
     isNew: true,
+    usesMarketPricing: false,
     ...overrides,
   };
+}
+
+function isRowBlank(row: RateEditorRow) {
+  return !row.paymentMethod && !row.currencyCode && !row.rateInput.trim() && !row.originalRateInput.trim();
+}
+
+function getRateRouteKey(paymentMethod: PaymentMethodKey | '', currencyCode: string) {
+  return paymentMethod && currencyCode ? `${paymentMethod}:${currencyCode}` : '';
+}
+
+function getVaultMarkupStorageKey(vaultId: string) {
+  return `peervaults:markups:${vaultId}`;
+}
+
+function loadVaultMarkups(vaultId: string): VaultMarkupMap {
+  if (!vaultId || typeof window === 'undefined') return {};
+
+  try {
+    const rawValue = window.localStorage.getItem(getVaultMarkupStorageKey(vaultId));
+    if (!rawValue) return {};
+    const parsed = JSON.parse(rawValue) as unknown;
+    return parsed && typeof parsed === 'object' ? (parsed as VaultMarkupMap) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveVaultMarkups(vaultId: string, markups: VaultMarkupMap) {
+  if (!vaultId || typeof window === 'undefined') return;
+  window.localStorage.setItem(getVaultMarkupStorageKey(vaultId), JSON.stringify(markups));
 }
 
 export default function App() {
@@ -174,6 +242,16 @@ export default function App() {
     });
   }, [walletClient]);
 
+  const readOnlyClient = useMemo(
+    () =>
+      new Zkp2pClient({
+        chainId: base.id,
+        runtimeEnv: appConfig.runtimeEnv,
+        rpcUrl: appConfig.rpcUrl,
+      } as ConstructorParameters<typeof Zkp2pClient>[0]),
+    [],
+  );
+
   const vaultsQuery = useQuery({
     queryKey: ['vaults-by-manager', address, appConfig.runtimeEnv],
     enabled: Boolean(client && address),
@@ -185,6 +263,22 @@ export default function App() {
 
       return result.map((item) => item.manager as DiscoveredVault);
     },
+  });
+
+  const publicVaultsQuery = useQuery({
+    queryKey: ['public-vaults', appConfig.runtimeEnv],
+    enabled: !isConnected,
+    queryFn: async () => {
+      const result = await readOnlyClient.indexer.getRateManagers({
+        limit: 6,
+        orderBy: 'currentDelegatedBalance',
+        orderDirection: 'desc',
+      });
+
+      return result as PublicVaultListItem[];
+    },
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   });
 
   const selectedVault = useMemo(
@@ -320,6 +414,7 @@ export default function App() {
 
   useEffect(() => {
     const rates = vaultDetailQuery.data?.rates ?? [];
+    const persistedMarkups = activeVaultId ? loadVaultMarkups(activeVaultId) : {};
     if (!activeVaultId) {
       setRateRows([createRateRow({ currencyCode: defaultCurrency })]);
       return;
@@ -341,11 +436,15 @@ export default function App() {
 
           return createRateRow({
             paymentMethod: option.key,
+            originalPaymentMethod: option.key,
             currencyCode: normalizedCurrencyCode,
+            originalCurrencyCode: normalizedCurrencyCode,
             originalRateInput: formatRate(BigInt(rate.managerRate)),
             rateInput: formatRate(BigInt(rate.managerRate)),
+            markupPercentInput: persistedMarkups[getRateRouteKey(option.key, normalizedCurrencyCode)] ?? '0',
             updatedAt: rate.updatedAt,
             isNew: false,
+            usesMarketPricing: false,
           });
         })
         .filter((row): row is RateEditorRow => Boolean(row))
@@ -367,9 +466,12 @@ export default function App() {
 
   const pendingRateRows = useMemo(
     () =>
-      rateRows.filter(
-        (row) => row.rateInput.trim() !== '' && row.rateInput.trim() !== row.originalRateInput.trim(),
-      ),
+      rateRows.filter((row) => {
+        const routeChanged =
+          row.paymentMethod !== row.originalPaymentMethod || row.currencyCode !== row.originalCurrencyCode;
+        const priceChanged = row.rateInput.trim() !== '' && row.rateInput.trim() !== row.originalRateInput.trim();
+        return routeChanged || priceChanged;
+      }),
     [rateRows],
   );
 
@@ -396,6 +498,7 @@ export default function App() {
     for (const row of pendingRateRows) {
       try {
         rateInputToPreciseUnits(row.rateInput);
+        percentToWad(row.markupPercentInput || '0');
       } catch (error) {
         return error instanceof Error ? error.message : 'One of the rates is invalid.';
       }
@@ -408,6 +511,26 @@ export default function App() {
     if (!publicClient) return;
 
     await publicClient.waitForTransactionReceipt({ hash });
+
+    if (activeVaultId) {
+      const nextMarkups = rateRows.reduce<VaultMarkupMap>((accumulator, row) => {
+        if (!row.paymentMethod || !row.currencyCode) return accumulator;
+
+        try {
+          if (rateInputToPreciseUnits(row.rateInput) === 0n) {
+            return accumulator;
+          }
+        } catch {
+          return accumulator;
+        }
+
+        accumulator[getRateRouteKey(row.paymentMethod, row.currencyCode)] = row.markupPercentInput || '0';
+        return accumulator;
+      }, {});
+
+      saveVaultMarkups(activeVaultId, nextMarkups);
+    }
+
     startTransition(() => {
       void queryClient.invalidateQueries({ queryKey: ['vault-config', activeVaultId] });
       void queryClient.invalidateQueries({ queryKey: ['vault-detail', activeVaultId] });
@@ -420,8 +543,180 @@ export default function App() {
     setRateRows((current) => current.map((row) => (row.id === id ? { ...row, ...updates } : row)));
   }
 
+  function getMarketAdjustedRate(
+    row: Pick<RateEditorRow, 'currencyCode' | 'markupPercentInput'>,
+    rates?: Record<string, string>,
+  ): MarketAdjustedRateResult {
+    if (!row.currencyCode) {
+      return { ok: false, error: 'Choose a currency first.' };
+    }
+
+    const marketRate = rates?.[row.currencyCode];
+    if (!marketRate) {
+      return { ok: false, error: `No Coinbase USDC rate found for ${row.currencyCode}.` };
+    }
+
+    try {
+      return {
+        ok: true,
+        rateInput: applyMarkupPercentToRate(marketRate, row.markupPercentInput || '0'),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : 'Could not calculate market rate.',
+      };
+    }
+  }
+
+  function updateMarkupForRow(id: string, markupPercentInput: string) {
+    setRateRows((current) =>
+      current.map((row) => {
+        if (row.id !== id) return row;
+
+        const nextRow = { ...row, markupPercentInput };
+        if (!row.usesMarketPricing) {
+          return nextRow;
+        }
+
+        const adjusted = getMarketAdjustedRate(nextRow, marketRatesQuery.data?.rates);
+        if (!adjusted.ok) {
+          return nextRow;
+        }
+
+        return {
+          ...nextRow,
+          rateInput: adjusted.rateInput,
+        };
+      }),
+    );
+  }
+
+  function discardRateChanges() {
+    const rates = vaultDetailQuery.data?.rates ?? [];
+    const persistedMarkups = activeVaultId ? loadVaultMarkups(activeVaultId) : {};
+
+    if (!activeVaultId || rates.length === 0) {
+      setRateRows([createRateRow({ currencyCode: defaultCurrency })]);
+      setTxMessage('Discarded unsaved changes.');
+      return;
+    }
+
+    setRateRows(
+      rates
+        .map((rate) => {
+          const option = paymentMethodLookup.get(rate.paymentMethodHash.toLowerCase());
+          if (!option) return null;
+          const candidate = rate as { currencyCode?: string; currency?: string };
+          const normalizedCurrencyCode =
+            normalizeCurrencyCode(candidate.currencyCode) || normalizeCurrencyCode(candidate.currency);
+
+          return createRateRow({
+            paymentMethod: option.key,
+            originalPaymentMethod: option.key,
+            currencyCode: normalizedCurrencyCode,
+            originalCurrencyCode: normalizedCurrencyCode,
+            originalRateInput: formatRate(BigInt(rate.managerRate)),
+            rateInput: formatRate(BigInt(rate.managerRate)),
+            markupPercentInput: persistedMarkups[getRateRouteKey(option.key, normalizedCurrencyCode)] ?? '0',
+            updatedAt: rate.updatedAt,
+            isNew: false,
+            usesMarketPricing: false,
+          });
+        })
+        .filter((row): row is RateEditorRow => Boolean(row))
+        .sort((a, b) => {
+          const aLabel = a.paymentMethod ? PLATFORM_METADATA[a.paymentMethod].displayName : '';
+          const bLabel = b.paymentMethod ? PLATFORM_METADATA[b.paymentMethod].displayName : '';
+          const paymentSort = aLabel.localeCompare(bLabel);
+          if (paymentSort !== 0) return paymentSort;
+          return a.currencyCode.localeCompare(b.currencyCode);
+        }),
+    );
+
+    setTxMessage('Discarded unsaved changes.');
+  }
+
   function addRateRow() {
     setRateRows((current) => [...current, createRateRow()]);
+  }
+
+  function addAllRouteRows() {
+    const allPairs = paymentOptions.flatMap((paymentOption) =>
+      currencyOptions.map((currencyCode) => ({
+        paymentMethod: paymentOption.key,
+        currencyCode,
+      })),
+    );
+
+    appendRouteRows(allPairs, 'Added {count} missing {label} to the price book.', 'All available routes are already in the price book.');
+  }
+
+  function addMajorRouteRows() {
+    const majorPairs = paymentOptions.flatMap((paymentOption) =>
+      majorCurrencyCodes.map((currencyCode) => ({
+        paymentMethod: paymentOption.key,
+        currencyCode,
+      })),
+    );
+
+    appendRouteRows(
+      majorPairs,
+      'Added {count} missing major {label} to the price book.',
+      'All major routes are already in the price book.',
+    );
+  }
+
+  function appendRouteRows(
+    pairs: Array<{ paymentMethod: PaymentMethodKey; currencyCode: string }>,
+    successTemplate: string,
+    emptyMessage: string,
+  ) {
+    const existingKeys = new Set(
+      rateRows
+        .filter((row) => row.paymentMethod && row.currencyCode)
+        .map((row) => `${row.paymentMethod}:${row.currencyCode}`),
+    );
+    const addedCount = pairs.filter(
+      ({ paymentMethod, currencyCode }) => !existingKeys.has(`${paymentMethod}:${currencyCode}`),
+    ).length;
+
+    setRateRows((current) => {
+      const existingKeys = new Set(
+        current
+          .filter((row) => row.paymentMethod && row.currencyCode)
+          .map((row) => `${row.paymentMethod}:${row.currencyCode}`),
+      );
+
+      const rowsToAdd = pairs
+        .filter(({ paymentMethod, currencyCode }) => !existingKeys.has(`${paymentMethod}:${currencyCode}`))
+        .map(({ paymentMethod, currencyCode }) =>
+          createRateRow({
+            paymentMethod,
+            currencyCode,
+          }),
+        );
+
+      const baseRows = current.filter((row) => !isRowBlank(row));
+      return rowsToAdd.length > 0 ? [...baseRows, ...rowsToAdd] : baseRows.length > 0 ? baseRows : current;
+    });
+
+    setTxMessage(
+      addedCount > 0
+        ? successTemplate
+            .replace('{count}', String(addedCount))
+            .replace('{label}', addedCount === 1 ? 'route' : 'routes')
+        : emptyMessage,
+    );
+  }
+
+  async function copyToClipboard(value: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setTxMessage(`${label} copied.`);
+    } catch {
+      setTxMessage(`Could not copy ${label.toLowerCase()}.`);
+    }
   }
 
   function resetRateRow(id: string) {
@@ -433,28 +728,109 @@ export default function App() {
         return [
           {
             ...row,
+            paymentMethod: row.originalPaymentMethod,
+            currencyCode: row.originalCurrencyCode,
+            markupPercentInput: '0',
             rateInput: row.originalRateInput,
+            usesMarketPricing: false,
           },
         ];
       }),
     );
   }
 
+  function deleteRateRow(id: string) {
+    setRateRows((current) =>
+      current.flatMap((row) => {
+        if (row.id !== id) return [row];
+        if (row.isNew) return [];
+
+        return [
+          {
+            ...row,
+            rateInput: '0',
+            markupPercentInput: '0',
+            usesMarketPricing: false,
+          },
+        ];
+      }),
+    );
+  }
+
+  function deleteAllPrices() {
+    setRateRows((current) => {
+      const existingRows = current
+        .filter((row) => !row.isNew)
+        .map((row) => ({
+          ...row,
+          rateInput: '0',
+          markupPercentInput: '0',
+          usesMarketPricing: false,
+        }));
+
+      return existingRows.length > 0 ? existingRows : [createRateRow({ currencyCode: defaultCurrency })];
+    });
+
+    setTxMessage('All existing prices staged for deletion. Click Update prices to send zero rates onchain.');
+  }
+
   function fillRowFromMarket(id: string) {
     const row = rateRows.find((item) => item.id === id);
     if (!row) return;
-    if (!row.currencyCode) {
-      setTxMessage('Choose a currency first.');
+    const adjusted = getMarketAdjustedRate(row, marketRatesQuery.data?.rates);
+    if (!adjusted.ok) {
+      setTxMessage(adjusted.error);
       return;
     }
 
-    const marketRate = marketRatesQuery.data?.rates[row.currencyCode];
-    if (!marketRate) {
-      setTxMessage(`No Coinbase USDC rate found for ${row.currencyCode}.`);
+    updateRateRow(id, {
+      rateInput: adjusted.rateInput,
+      usesMarketPricing: true,
+    });
+  }
+
+  async function fillAllRowsFromMarket() {
+    const result = await marketRatesQuery.refetch();
+    const rates = result.data?.rates ?? marketRatesQuery.data?.rates;
+    if (!rates) {
+      setTxMessage('Could not load market prices.');
       return;
     }
 
-    updateRateRow(id, { rateInput: marketRate });
+    let updatedCount = 0;
+    let skippedCount = 0;
+
+    setRateRows((current) =>
+      current.map((row) => {
+        if (row.isNew && !row.paymentMethod && !row.currencyCode) {
+          return row;
+        }
+
+        const adjusted = getMarketAdjustedRate(row, rates);
+        if (!adjusted.ok) {
+          skippedCount += 1;
+          return row;
+        }
+
+        updatedCount += 1;
+        return {
+          ...row,
+          rateInput: adjusted.rateInput,
+          usesMarketPricing: true,
+        };
+      }),
+    );
+
+    if (updatedCount === 0) {
+      setTxMessage('No rows could be updated from market.');
+      return;
+    }
+
+    setTxMessage(
+      skippedCount > 0
+        ? `Updated ${updatedCount} ${updatedCount === 1 ? 'price' : 'prices'} from market. Skipped ${skippedCount}.`
+        : `Updated ${updatedCount} ${updatedCount === 1 ? 'price' : 'prices'} from market.`,
+    );
   }
 
   const saveRatesMutation = useMutation({
@@ -464,36 +840,56 @@ export default function App() {
       if (pendingRateRows.length === 0) throw new Error('No rate changes to save.');
       if (rateValidationError) throw new Error(rateValidationError);
 
-      if (pendingRateRows.length === 1) {
-        const row = pendingRateRows[0];
+      const queuedRateMap = new Map<string, { paymentMethodHash: Hex; currencyHash: Hex; rate: bigint }>();
+
+      for (const row of pendingRateRows) {
         if (!row.paymentMethod || !row.currencyCode) {
           throw new Error('Method and currency are required.');
         }
+
+        const routeChanged =
+          row.paymentMethod !== row.originalPaymentMethod || row.currencyCode !== row.originalCurrencyCode;
+
+        if (!row.isNew && routeChanged && row.originalPaymentMethod && row.originalCurrencyCode) {
+          const originalPaymentMethodHash = resolvePaymentMethodHash(row.originalPaymentMethod, {
+            env: appConfig.runtimeEnv,
+          });
+          const originalCurrencyHash = resolveFiatCurrencyBytes32(row.originalCurrencyCode);
+          queuedRateMap.set(`${originalPaymentMethodHash}:${originalCurrencyHash}`, {
+            paymentMethodHash: originalPaymentMethodHash,
+            currencyHash: originalCurrencyHash,
+            rate: 0n,
+          });
+        }
+
+        const paymentMethodHash = resolvePaymentMethodHash(row.paymentMethod, { env: appConfig.runtimeEnv });
+        const currencyHash = resolveFiatCurrencyBytes32(row.currencyCode);
+        queuedRateMap.set(`${paymentMethodHash}:${currencyHash}`, {
+          paymentMethodHash,
+          currencyHash,
+          rate: rateInputToPreciseUnits(row.rateInput),
+        });
+      }
+
+      const queuedRates = [...queuedRateMap.values()];
+
+      if (queuedRates.length === 1) {
+        const row = pendingRateRows[0];
+        const item = queuedRates[0];
         const hash = await client.setVaultMinRate({
           rateManagerId: activeVaultId as Hex,
-          paymentMethodHash: resolvePaymentMethodHash(row.paymentMethod, { env: appConfig.runtimeEnv }),
-          currencyHash: resolveFiatCurrencyBytes32(row.currencyCode),
-          rate: rateInputToPreciseUnits(row.rateInput),
+          paymentMethodHash: item.paymentMethodHash,
+          currencyHash: item.currencyHash,
+          rate: item.rate,
         });
 
         return {
           hash,
-          label: `${PLATFORM_METADATA[row.paymentMethod].displayName} / ${row.currencyCode} saved`,
+          label: row.paymentMethod ? `${PLATFORM_METADATA[row.paymentMethod].displayName} / ${row.currencyCode} saved` : 'Rate saved',
         };
       }
 
-      const grouped = groupQueuedRates(
-        pendingRateRows.map((row) => ({
-          ...(row.paymentMethod && row.currencyCode
-            ? {}
-            : (() => {
-                throw new Error('Method and currency are required.');
-              })()),
-          paymentMethodHash: resolvePaymentMethodHash(row.paymentMethod, { env: appConfig.runtimeEnv }),
-          currencyHash: resolveFiatCurrencyBytes32(row.currencyCode),
-          rate: rateInputToPreciseUnits(row.rateInput),
-        })),
-      );
+      const grouped = groupQueuedRates(queuedRates);
 
       const hash = await client.setVaultMinRatesBatch({
         rateManagerId: activeVaultId as Hex,
@@ -547,7 +943,7 @@ export default function App() {
     <main className="shell">
       <header className="header-bar">
         <div className="title-stack">
-          <h1>{appConfig.appName}</h1>
+          <img src={peerVaultsLogo} alt="Peer Vaults" className="brand-logo" />
         </div>
         <div className="header-actions">
           {isConnected ? (
@@ -575,13 +971,83 @@ export default function App() {
       </header>
 
       {!isConnected ? (
-        <section className="card simple-card">
-          <h2>Vault manager dashboard</h2>
-          <p className="muted">
-            PeerVaults is a management dashboard for Peer.xyz vault managers. Connect the manager wallet to review
-            delegated deposits, update rates, and manage vault settings from one place.
-          </p>
-        </section>
+        <>
+          <section className="card simple-card">
+            <h2>Vault manager dashboard</h2>
+            <p className="muted">
+              Peer Vaults is a management dashboard for Peer.xyz vault managers. Connect the manager wallet to review
+              delegated deposits, update rates, and manage vault settings from one place.
+            </p>
+          </section>
+
+          <section className="card docs-card">
+            <div className="section-head">
+              <div>
+                <p className="eyebrow">Docs</p>
+                <h2>How to use</h2>
+              </div>
+            </div>
+            <div className="docs-list">
+              <p className="muted">
+                To use this dashboard, you need the actual manager wallet in a standard browser wallet. If the vault is
+                managed by a Privy wallet inside Peer.xyz, export that wallet&apos;s private key and import it into a wallet
+                like MetaMask first.
+              </p>
+              <p className="muted">
+                Once connected on Base, the app will find vaults managed by that wallet, let you update prices, and
+                edit vault settings.
+              </p>
+              <p className="muted">You also need a small amount of Base ETH in the connected manager wallet for gas.</p>
+              <a
+                className="link-chip docs-link"
+                href="https://github.com/mohammed7s/peervaults"
+                target="_blank"
+                rel="noreferrer"
+              >
+                View GitHub
+              </a>
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="section-head">
+              <div>
+                <p className="eyebrow">Network</p>
+                <h2>Active vaults</h2>
+              </div>
+            </div>
+            {publicVaultsQuery.isLoading ? (
+              <p className="muted">Loading public vaults...</p>
+            ) : publicVaultsQuery.error ? (
+              <p className="error-text">{(publicVaultsQuery.error as Error).message}</p>
+            ) : publicVaultsQuery.data && publicVaultsQuery.data.length > 0 ? (
+              <div className="deposit-table">
+                {publicVaultsQuery.data.map((vault) => (
+                  <div key={vault.manager.rateManagerId} className="deposit-row">
+                    <div>
+                      <p className="label">Vault</p>
+                      <strong>{vault.manager.name || 'Untitled vault'}</strong>
+                    </div>
+                    <div>
+                      <p className="label">Manager</p>
+                      <strong className="mono-value">{shortHex(vault.manager.manager)}</strong>
+                    </div>
+                    <div>
+                      <p className="label">Liquidity</p>
+                      <strong>{formatLiquidity(vault.aggregate?.currentDelegatedBalance ?? '0')}</strong>
+                    </div>
+                    <div>
+                      <p className="label">Deposits</p>
+                      <strong>{String(vault.aggregate?.currentDelegatedDeposits ?? 0)}</strong>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">No public vaults found.</p>
+            )}
+          </section>
+        </>
       ) : vaultsQuery.isLoading ? (
         <section className="card simple-card">
           <h2>Loading vaults...</h2>
@@ -761,6 +1227,22 @@ export default function App() {
                   <h2>Prices</h2>
                 </div>
                 <div className="section-actions">
+                  <button className="button button-secondary button-compact" onClick={deleteAllPrices}>
+                    Delete all prices
+                  </button>
+                  <button className="button button-secondary button-compact" onClick={addMajorRouteRows}>
+                    Add major pairs
+                  </button>
+                  <button className="button button-secondary button-compact" onClick={addAllRouteRows}>
+                    Add all routes
+                  </button>
+                  <button
+                    className="button button-secondary button-compact"
+                    onClick={() => void fillAllRowsFromMarket()}
+                    disabled={marketRatesQuery.isFetching || !rateRows.length}
+                  >
+                    Update with market all
+                  </button>
                   <button
                     className="button button-secondary button-compact"
                     onClick={() => void marketRatesQuery.refetch()}
@@ -777,80 +1259,96 @@ export default function App() {
                 <p className="error-text">{(vaultDetailQuery.error as Error).message}</p>
               ) : (
                 <div className="editor-table">
-                  {rateRows.map((row) => {
-                    const hasPendingChange = row.rateInput.trim() !== row.originalRateInput.trim();
-                    const paymentMethodLabel = row.paymentMethod
-                      ? PLATFORM_METADATA[row.paymentMethod].displayName
-                      : 'Select method';
+                  <div className="editor-table-head">
+                    <span className="editor-head-cell">#</span>
+                    <span className="editor-head-cell">Method</span>
+                    <span className="editor-head-cell">Currency</span>
+                    <span className="editor-head-cell">Markup %</span>
+                    <span className="editor-head-cell">Price</span>
+                    <span className="editor-head-cell editor-head-cell-updated">Updated</span>
+                    <span className="editor-head-cell">Actions</span>
+                  </div>
+                  {rateRows.map((row, index) => {
+                    const hasPendingChange =
+                      row.rateInput.trim() !== row.originalRateInput.trim() ||
+                      row.paymentMethod !== row.originalPaymentMethod ||
+                      row.currencyCode !== row.originalCurrencyCode;
 
                     return (
                       <div key={row.id} className={`editor-row${hasPendingChange ? ' editor-row-pending' : ''}`}>
-                        {row.isNew ? (
-                          <>
-                            <label>
-                              <span>Method</span>
-                              <select
-                                value={row.paymentMethod}
-                                onChange={(event) =>
-                                  updateRateRow(row.id, {
-                                    paymentMethod: event.target.value as PaymentMethodKey | '',
-                                  })
-                                }
-                              >
-                                <option value="">Select</option>
-                                {paymentOptions.map((option) => (
-                                  <option key={option.key} value={option.key}>
-                                    {option.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label>
-                              <span>Currency</span>
-                              <select
-                                value={row.currencyCode}
-                                onChange={(event) => updateRateRow(row.id, { currencyCode: event.target.value })}
-                              >
-                                <option value="">Select</option>
-                                {currencyOptions.map((currency) => (
-                                  <option key={currency} value={currency}>
-                                    {currency}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          </>
-                        ) : (
-                          <>
-                            <div className="static-cell">
-                              <p className="label">Method</p>
-                              <strong>{paymentMethodLabel}</strong>
-                            </div>
-                            <div className="static-cell">
-                              <p className="label">Currency</p>
-                              <strong>{row.currencyCode}</strong>
-                            </div>
-                          </>
-                        )}
-                        <label>
-                          <span>Price</span>
+                        <div className="line-number-cell">
+                          <strong>{index + 1}</strong>
+                        </div>
+                        <div className="editor-field">
+                          <select
+                            value={row.paymentMethod}
+                            onChange={(event) =>
+                              updateRateRow(row.id, {
+                                paymentMethod: event.target.value as PaymentMethodKey | '',
+                              })
+                            }
+                          >
+                            <option value="">Select</option>
+                            {paymentOptions.map((option) => (
+                              <option key={option.key} value={option.key}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="editor-field">
+                          <select
+                            value={row.currencyCode}
+                            onChange={(event) => updateRateRow(row.id, { currencyCode: event.target.value })}
+                          >
+                            <option value="">Select</option>
+                            {currencyOptions.map((currency) => (
+                              <option key={currency} value={currency}>
+                                {currency}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="editor-field">
+                          <input
+                            value={row.markupPercentInput}
+                            onChange={(event) => updateMarkupForRow(row.id, event.target.value)}
+                            placeholder="0"
+                          />
+                        </div>
+                        <div className="editor-field">
                           <input
                             value={row.rateInput}
-                            onChange={(event) => updateRateRow(row.id, { rateInput: event.target.value })}
+                            onChange={(event) =>
+                              updateRateRow(row.id, {
+                                rateInput: event.target.value,
+                                usesMarketPricing: false,
+                              })
+                            }
                             placeholder="1.00"
                           />
-                        </label>
-                        <div>
-                          <p className="label">Updated</p>
+                        </div>
+                        <div className="static-cell static-cell-tight updated-cell">
                           <strong>{formatUpdatedAt(row.updatedAt)}</strong>
                         </div>
                         <div className="editor-row-actions">
                           <button className="text-button" onClick={() => fillRowFromMarket(row.id)}>
                             Use market
                           </button>
-                          <button className="text-button" onClick={() => resetRateRow(row.id)}>
-                            {row.isNew ? 'Remove' : 'Reset'}
-                          </button>
+                          {row.isNew ? (
+                            <button className="text-button" onClick={() => deleteRateRow(row.id)}>
+                              Remove
+                            </button>
+                          ) : (
+                            <>
+                              <button className="text-button" onClick={() => resetRateRow(row.id)}>
+                                Reset
+                              </button>
+                              <button className="text-button" onClick={() => deleteRateRow(row.id)}>
+                                Delete
+                              </button>
+                            </>
+                          )}
                         </div>
                       </div>
                     );
@@ -870,6 +1368,13 @@ export default function App() {
                       ? 'No pending price changes'
                       : `${pendingRateRows.length} pending ${pendingRateRows.length === 1 ? 'change' : 'changes'}`}
                   </p>
+                  <button
+                    className="button button-secondary"
+                    disabled={!pendingRateRows.length || saveRatesMutation.isPending}
+                    onClick={discardRateChanges}
+                  >
+                    Discard changes
+                  </button>
                   <button
                     className="button button-primary"
                     disabled={!connectedIsManager || !activeVaultId || !pendingRateRows.length || Boolean(rateValidationError) || saveRatesMutation.isPending}
@@ -899,7 +1404,14 @@ export default function App() {
                     <div key={deposit.id} className="deposit-row">
                       <div>
                         <p className="label">Depositor</p>
-                        <strong className="mono-value">{shortHex(deposit.depositor)}</strong>
+                        <button
+                          type="button"
+                          className="copy-chip mono-value"
+                          onClick={() => void copyToClipboard(deposit.depositor, 'Depositor address')}
+                          title={deposit.depositor}
+                        >
+                          {shortHex(deposit.depositor)}
+                        </button>
                       </div>
                       <div>
                         <p className="label">Liquidity</p>

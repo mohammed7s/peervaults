@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 72" fill="none">
+  <rect width="72" height="72" rx="16" fill="#08111f"/>
+  <path d="M18 18h24.5c10.77 0 19.5 8.73 19.5 19.5S53.27 57 42.5 57H30v11H18V18Zm12 12v15h12.5a7.5 7.5 0 1 0 0-15H30Z" fill="#edf3ff"/>
+  <path d="M49 13 29 33.5l6 6L55 19l-6-6Z" fill="#f2994a"/>
+  <text x="96" y="46" fill="#edf3ff" font-family="IBM Plex Sans, Arial, sans-serif" font-size="32" font-weight="700" letter-spacing="-0.02em">Peer Vaults</text>
+</svg>

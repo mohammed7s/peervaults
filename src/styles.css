@@ -74,6 +74,12 @@ code {
   gap: 8px;
 }
 
+.brand-logo {
+  display: block;
+  width: min(320px, 56vw);
+  height: auto;
+}
+
 .header-bar {
   padding-bottom: 12px;
   border-bottom: 1px solid rgba(104, 127, 160, 0.12);
@@ -160,6 +166,19 @@ h3 {
   color: #d7e5ff;
 }
 
+.copy-chip {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.copy-chip:hover {
+  color: var(--accent-strong);
+}
+
 .mono-value {
   overflow-wrap: anywhere;
   font-family: 'IBM Plex Mono', monospace;
@@ -193,6 +212,11 @@ h3 {
   border: 1px solid var(--card-border);
 }
 
+.docs-link {
+  width: fit-content;
+  margin-top: 4px;
+}
+
 .vault-id {
   display: block;
   max-width: 100%;
@@ -208,6 +232,10 @@ h3 {
 .deposit-table {
   display: grid;
   gap: 16px;
+}
+
+.deposit-table {
+  margin-top: 6px;
 }
 
 .summary-grid {
@@ -308,14 +336,40 @@ dt {
 
 .editor-table {
   margin-top: 8px;
+  gap: 8px;
+}
+
+.editor-table-head {
+  display: grid;
+  grid-template-columns: 34px minmax(150px, 1.5fr) minmax(84px, 0.8fr) minmax(92px, 0.9fr) minmax(120px, 1fr) minmax(82px, 0.8fr) max-content;
+  gap: 10px;
+  padding: 0 10px;
+  align-items: center;
+}
+
+.editor-head-cell {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.editor-head-cell:last-child {
+  text-align: right;
+}
+
+.editor-head-cell-updated {
+  text-align: right;
+  justify-self: end;
 }
 
 .editor-row {
   display: grid;
-  grid-template-columns: 1.05fr 0.62fr 0.82fr 0.65fr 104px;
-  gap: 12px;
-  align-items: end;
-  font-size: 0.9rem;
+  grid-template-columns: 34px minmax(150px, 1.5fr) minmax(84px, 0.8fr) minmax(92px, 0.9fr) minmax(120px, 1fr) minmax(82px, 0.8fr) max-content;
+  gap: 10px;
+  align-items: center;
+  font-size: 0.84rem;
+  padding: 9px 12px;
 }
 
 .deposit-row {
@@ -335,22 +389,71 @@ dt {
 
 .static-cell {
   display: grid;
-  gap: 4px;
+  gap: 2px;
+  min-width: 0;
+}
+
+.static-cell strong {
+  font-size: 0.8rem;
+}
+
+.static-cell-tight {
+  justify-items: start;
+}
+
+.updated-cell {
+  width: 100%;
+  justify-self: end;
+  justify-items: end;
+  text-align: right;
+}
+
+.updated-cell strong {
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.line-number-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  justify-items: center;
+}
+
+.line-number-cell strong {
+  font-family: 'IBM Plex Mono', monospace;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .editor-row-actions {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-  align-items: stretch;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .editor-row-actions .text-button {
+  min-height: 26px;
+  justify-content: center;
+  font-size: 0.72rem;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.editor-field {
+  min-width: 0;
+}
+
+.editor-field input,
+.editor-field select {
   width: 100%;
   min-height: 30px;
-  justify-content: center;
-  font-size: 0.78rem;
-  padding: 6px 8px;
+  padding: 0 9px;
+  font-size: 0.8rem;
 }
 
 .save-bar {
