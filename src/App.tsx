@@ -2,6 +2,7 @@ import {
   PLATFORM_METADATA,
   Zkp2pClient,
   currencyInfo,
+  getPaymentMethodsCatalog,
   getCurrencyCodeFromHash,
   resolveFiatCurrencyBytes32,
   resolvePaymentMethodHash,
@@ -17,7 +18,7 @@ import {
   useWalletClient,
 } from 'wagmi';
 import { base } from 'wagmi/chains';
-import { formatUnits, type Address, type Hex } from 'viem';
+import { formatUnits, parseAbi, parseEventLogs, type Address, type Hex } from 'viem';
 import peerVaultsLogo from './assets/peervaults-logo.svg';
 import { appConfig } from './lib/config';
 import {
@@ -28,6 +29,7 @@ import {
   groupQueuedRates,
   percentToWad,
   rateInputToPreciseUnits,
+  usdcInputToBaseUnits,
 } from './lib/rateManager';
 
 type VaultConfig = {
@@ -96,11 +98,40 @@ type MarketAdjustedRateResult =
   | { ok: true; rateInput: string }
   | { ok: false; error: string };
 type VaultMarkupMap = Record<string, string>;
+type CreateVaultForm = {
+  manager: string;
+  feeRecipient: string;
+  name: string;
+  uri: string;
+  feePercent: string;
+  maxFeePercent: string;
+  minLiquidityUsdc: string;
+};
+
+const RATE_MANAGER_CREATED_ABI = parseAbi([
+  'event RateManagerCreated(bytes32 indexed rateManagerId, address indexed manager, address indexed feeRecipient, uint256 maxFee, uint256 fee, string name, string uri)',
+]);
 
 const paymentOptions = Object.entries(PLATFORM_METADATA)
+  .filter(([key]) => {
+    const catalog = getPaymentMethodsCatalog(base.id, appConfig.runtimeEnv);
+    return Boolean(catalog[key.toLowerCase()]);
+  })
   .map(([key, value]) => ({ key: key as PaymentMethodKey, label: value.displayName }))
   .sort((a, b) => a.label.localeCompare(b.label));
-const currencyOptions = Object.keys(currencyInfo).sort();
+const paymentMethodCatalog = getPaymentMethodsCatalog(base.id, appConfig.runtimeEnv);
+const allowedCurrenciesByPaymentMethod = Object.fromEntries(
+  Object.entries(paymentMethodCatalog)
+    .filter(([key]) => key in PLATFORM_METADATA)
+    .map(([key, value]) => [
+      key as PaymentMethodKey,
+      (value.currencies ?? [])
+        .map((currencyHash) => getCurrencyCodeFromHash(currencyHash))
+        .filter((currencyCode): currencyCode is string => Boolean(currencyCode && currencyCode in currencyInfo))
+        .sort(),
+    ]),
+) as Record<PaymentMethodKey, string[]>;
+const currencyOptions = [...new Set(Object.values(allowedCurrenciesByPaymentMethod).flat())].sort();
 const defaultCurrency = currencyOptions.includes('USD') ? 'USD' : (currencyOptions[0] ?? 'USD');
 const majorCurrencyCodes = ['USD', 'EUR', 'GBP'].filter((currencyCode) => currencyOptions.includes(currencyCode));
 const marketRateSourceUrl = 'https://api.coinbase.com/v2/exchange-rates?currency=USDC';
@@ -116,6 +147,18 @@ const emptyConfigForm = {
   name: '',
   uri: '',
 };
+
+function makeCreateVaultForm(address?: string): CreateVaultForm {
+  return {
+    manager: address ?? '',
+    feeRecipient: address ?? '',
+    name: '',
+    uri: '',
+    feePercent: '0.10',
+    maxFeePercent: '2.00',
+    minLiquidityUsdc: '0',
+  };
+}
 
 let rateRowCounter = 0;
 
@@ -191,6 +234,11 @@ function getRateRouteKey(paymentMethod: PaymentMethodKey | '', currencyCode: str
   return paymentMethod && currencyCode ? `${paymentMethod}:${currencyCode}` : '';
 }
 
+function isAllowedRoute(paymentMethod: PaymentMethodKey | '', currencyCode: string) {
+  if (!paymentMethod || !currencyCode) return false;
+  return allowedCurrenciesByPaymentMethod[paymentMethod]?.includes(currencyCode) ?? false;
+}
+
 function getVaultMarkupStorageKey(vaultId: string) {
   return `peervaults:markups:${vaultId}`;
 }
@@ -225,10 +273,12 @@ export default function App() {
 
   const [selectedVaultId, setSelectedVaultId] = useState<Hex | ''>(appConfig.vaultId);
   const [configForm, setConfigForm] = useState(emptyConfigForm);
+  const [createVaultForm, setCreateVaultForm] = useState<CreateVaultForm>(makeCreateVaultForm());
   const [feeInput, setFeeInput] = useState('0.10');
   const [rateRows, setRateRows] = useState<RateEditorRow[]>([
     createRateRow({ currencyCode: defaultCurrency }),
   ]);
+  const [showCreateVault, setShowCreateVault] = useState(false);
   const [showVaultSettings, setShowVaultSettings] = useState(false);
   const [txMessage, setTxMessage] = useState('');
 
@@ -375,8 +425,10 @@ export default function App() {
 
     setSelectedVaultId('');
     setConfigForm(emptyConfigForm);
+    setCreateVaultForm(makeCreateVaultForm());
     setFeeInput('0.10');
     setRateRows([createRateRow({ currencyCode: defaultCurrency })]);
+    setShowCreateVault(false);
     setShowVaultSettings(false);
     setTxMessage('');
     queryClient.removeQueries({ queryKey: ['vault-config'] });
@@ -399,6 +451,17 @@ export default function App() {
     const fallbackVault = vaultsQuery.data.find((vault) => vault.rateManagerId === appConfig.vaultId);
     setSelectedVaultId((fallbackVault ?? vaultsQuery.data[0]).rateManagerId);
   }, [selectedVaultId, vaultsQuery.data]);
+
+  useEffect(() => {
+    setCreateVaultForm((current) => {
+      if (!address) return current;
+      return {
+        ...current,
+        manager: current.manager || address,
+        feeRecipient: current.feeRecipient || address,
+      };
+    });
+  }, [address]);
 
   useEffect(() => {
     if (!vaultConfigQuery.data) return;
@@ -486,6 +549,10 @@ export default function App() {
 
       if (!row.paymentMethod || !row.currencyCode || !row.rateInput.trim()) {
         return 'Every added row needs a method, currency, and price.';
+      }
+
+      if (!isAllowedRoute(row.paymentMethod, row.currencyCode)) {
+        return `${PLATFORM_METADATA[row.paymentMethod].displayName} does not support ${row.currencyCode} on Peer.xyz.`;
       }
 
       const key = `${row.paymentMethod}:${row.currencyCode}`;
@@ -643,7 +710,7 @@ export default function App() {
 
   function addAllRouteRows() {
     const allPairs = paymentOptions.flatMap((paymentOption) =>
-      currencyOptions.map((currencyCode) => ({
+      (allowedCurrenciesByPaymentMethod[paymentOption.key] ?? []).map((currencyCode) => ({
         paymentMethod: paymentOption.key,
         currencyCode,
       })),
@@ -654,10 +721,12 @@ export default function App() {
 
   function addMajorRouteRows() {
     const majorPairs = paymentOptions.flatMap((paymentOption) =>
-      majorCurrencyCodes.map((currencyCode) => ({
-        paymentMethod: paymentOption.key,
-        currencyCode,
-      })),
+      (allowedCurrenciesByPaymentMethod[paymentOption.key] ?? [])
+        .filter((currencyCode) => majorCurrencyCodes.includes(currencyCode))
+        .map((currencyCode) => ({
+          paymentMethod: paymentOption.key,
+          currencyCode,
+        })),
     );
 
     appendRouteRows(
@@ -939,6 +1008,57 @@ export default function App() {
     onError: (error: unknown) => setTxMessage(error instanceof Error ? error.message : 'Settings update failed'),
   });
 
+  const createVaultMutation = useMutation({
+    mutationFn: async () => {
+      if (!client) throw new Error('Connect the manager wallet first.');
+      if (!publicClient) throw new Error('Public client unavailable.');
+      if (!createVaultForm.name.trim()) throw new Error('Vault name is required.');
+      if (!createVaultForm.uri.trim()) throw new Error('Vault URI is required.');
+      if (!createVaultForm.manager.trim()) throw new Error('Manager address is required.');
+      if (!createVaultForm.feeRecipient.trim()) throw new Error('Fee recipient is required.');
+
+      const fee = percentToWad(createVaultForm.feePercent);
+      const maxFee = percentToWad(createVaultForm.maxFeePercent);
+      if (fee > maxFee) {
+        throw new Error('Fee cannot be greater than max fee.');
+      }
+
+      const hash = await client.createRateManager({
+        config: {
+          manager: createVaultForm.manager as Address,
+          feeRecipient: createVaultForm.feeRecipient as Address,
+          fee,
+          maxFee,
+          minLiquidity: usdcInputToBaseUnits(createVaultForm.minLiquidityUsdc),
+          name: createVaultForm.name.trim(),
+          uri: createVaultForm.uri.trim(),
+        },
+      });
+
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      const events = parseEventLogs({
+        abi: RATE_MANAGER_CREATED_ABI,
+        eventName: 'RateManagerCreated',
+        logs: receipt.logs,
+        strict: false,
+      });
+      const createdId = events[0]?.args.rateManagerId as Hex | undefined;
+
+      return { hash, createdId };
+    },
+    onSuccess: async ({ hash, createdId }) => {
+      await queryClient.invalidateQueries({ queryKey: ['vaults-by-manager', address, appConfig.runtimeEnv] });
+      setTxMessage(createdId ? `Vault created: ${createdId}` : `Vault created: ${hash}`);
+      setShowCreateVault(false);
+      setCreateVaultForm(makeCreateVaultForm(address));
+      if (createdId) {
+        setSelectedVaultId(createdId);
+      }
+    },
+    onError: (error: unknown) =>
+      setTxMessage(error instanceof Error ? error.message : 'Vault creation failed'),
+  });
+
   return (
     <main className="shell">
       <header className="header-bar">
@@ -1057,8 +1177,92 @@ export default function App() {
           <p className="error-text">{(vaultsQuery.error as Error).message}</p>
         </section>
       ) : !vaultsQuery.data || vaultsQuery.data.length === 0 ? (
-        <section className="card simple-card">
-          <h2>No vaults found for this wallet</h2>
+        <section className="card">
+          <div className="summary-head">
+            <div>
+              <p className="eyebrow">Create</p>
+              <h2>Create your first vault</h2>
+            </div>
+          </div>
+          <p className="muted">This wallet does not manage any vaults yet. Deploy one from here.</p>
+          <div className="vault-settings-grid create-vault-grid">
+            <section className="subcard">
+              <div className="subcard-head">
+                <h3>Vault</h3>
+              </div>
+              <label>
+                <span>Name</span>
+                <input
+                  value={createVaultForm.name}
+                  onChange={(event) => setCreateVaultForm((current) => ({ ...current, name: event.target.value }))}
+                  placeholder="Peer Vaults Alpha"
+                />
+              </label>
+              <label>
+                <span>URI</span>
+                <input
+                  value={createVaultForm.uri}
+                  onChange={(event) => setCreateVaultForm((current) => ({ ...current, uri: event.target.value }))}
+                  placeholder="https://..."
+                />
+              </label>
+              <label>
+                <span>Manager</span>
+                <input
+                  value={createVaultForm.manager}
+                  onChange={(event) => setCreateVaultForm((current) => ({ ...current, manager: event.target.value }))}
+                />
+              </label>
+              <label>
+                <span>Fee recipient</span>
+                <input
+                  value={createVaultForm.feeRecipient}
+                  onChange={(event) =>
+                    setCreateVaultForm((current) => ({ ...current, feeRecipient: event.target.value }))
+                  }
+                />
+              </label>
+            </section>
+            <section className="subcard">
+              <div className="subcard-head">
+                <h3>Pricing</h3>
+              </div>
+              <label>
+                <span>Fee %</span>
+                <input
+                  value={createVaultForm.feePercent}
+                  onChange={(event) =>
+                    setCreateVaultForm((current) => ({ ...current, feePercent: event.target.value }))
+                  }
+                />
+              </label>
+              <label>
+                <span>Max fee %</span>
+                <input
+                  value={createVaultForm.maxFeePercent}
+                  onChange={(event) =>
+                    setCreateVaultForm((current) => ({ ...current, maxFeePercent: event.target.value }))
+                  }
+                />
+              </label>
+              <label>
+                <span>Min liquidity USDC</span>
+                <input
+                  value={createVaultForm.minLiquidityUsdc}
+                  onChange={(event) =>
+                    setCreateVaultForm((current) => ({ ...current, minLiquidityUsdc: event.target.value }))
+                  }
+                />
+              </label>
+              <button
+                className="button button-primary"
+                disabled={createVaultMutation.isPending}
+                onClick={() => createVaultMutation.mutate()}
+              >
+                {createVaultMutation.isPending ? 'Deploying...' : 'Create vault'}
+              </button>
+            </section>
+          </div>
         </section>
       ) : (
         <>
@@ -1069,6 +1273,11 @@ export default function App() {
                 <h2>{vaultConfigQuery.data?.name || selectedVault?.name || 'Vault'}</h2>
               </div>
               <div className="summary-actions">
+                {!showCreateVault ? (
+                  <button className="button button-secondary button-compact" onClick={() => setShowCreateVault(true)}>
+                    Create vault
+                  </button>
+                ) : null}
                 {vaultsQuery.data.length > 1 ? (
                   <label className="vault-selector">
                     <span>Vault</span>
@@ -1124,6 +1333,102 @@ export default function App() {
                 <strong>{vaultConfigQuery.data ? formatPercentFromWad(vaultConfigQuery.data.maxFee) : '...'}</strong>
               </div>
             </div>
+
+            {showCreateVault ? (
+              <div className="vault-settings-panel">
+                <div className="vault-settings-head">
+                  <h3>Create vault</h3>
+                  <button className="button button-secondary button-compact" onClick={() => setShowCreateVault(false)}>
+                    Close create vault
+                  </button>
+                </div>
+                <div className="vault-settings-grid create-vault-grid">
+                  <section className="subcard">
+                    <div className="subcard-head">
+                      <h3>Vault</h3>
+                    </div>
+                    <label>
+                      <span>Name</span>
+                      <input
+                        value={createVaultForm.name}
+                        onChange={(event) =>
+                          setCreateVaultForm((current) => ({ ...current, name: event.target.value }))
+                        }
+                        placeholder="Peer Vaults Alpha"
+                      />
+                    </label>
+                    <label>
+                      <span>URI</span>
+                      <input
+                        value={createVaultForm.uri}
+                        onChange={(event) =>
+                          setCreateVaultForm((current) => ({ ...current, uri: event.target.value }))
+                        }
+                        placeholder="https://..."
+                      />
+                    </label>
+                    <label>
+                      <span>Manager</span>
+                      <input
+                        value={createVaultForm.manager}
+                        onChange={(event) =>
+                          setCreateVaultForm((current) => ({ ...current, manager: event.target.value }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>Fee recipient</span>
+                      <input
+                        value={createVaultForm.feeRecipient}
+                        onChange={(event) =>
+                          setCreateVaultForm((current) => ({ ...current, feeRecipient: event.target.value }))
+                        }
+                      />
+                    </label>
+                  </section>
+
+                  <section className="subcard">
+                    <div className="subcard-head">
+                      <h3>Pricing</h3>
+                    </div>
+                    <label>
+                      <span>Fee %</span>
+                      <input
+                        value={createVaultForm.feePercent}
+                        onChange={(event) =>
+                          setCreateVaultForm((current) => ({ ...current, feePercent: event.target.value }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>Max fee %</span>
+                      <input
+                        value={createVaultForm.maxFeePercent}
+                        onChange={(event) =>
+                          setCreateVaultForm((current) => ({ ...current, maxFeePercent: event.target.value }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>Min liquidity USDC</span>
+                      <input
+                        value={createVaultForm.minLiquidityUsdc}
+                        onChange={(event) =>
+                          setCreateVaultForm((current) => ({ ...current, minLiquidityUsdc: event.target.value }))
+                        }
+                      />
+                    </label>
+                    <button
+                      className="button button-primary"
+                      disabled={createVaultMutation.isPending}
+                      onClick={() => createVaultMutation.mutate()}
+                    >
+                      {createVaultMutation.isPending ? 'Deploying...' : 'Create vault'}
+                    </button>
+                  </section>
+                </div>
+              </div>
+            ) : null}
 
             {showVaultSettings ? (
               <div className="vault-settings-panel">
@@ -1273,6 +1578,9 @@ export default function App() {
                       row.rateInput.trim() !== row.originalRateInput.trim() ||
                       row.paymentMethod !== row.originalPaymentMethod ||
                       row.currencyCode !== row.originalCurrencyCode;
+                    const availableCurrencies = row.paymentMethod
+                      ? (allowedCurrenciesByPaymentMethod[row.paymentMethod] ?? [])
+                      : currencyOptions;
 
                     return (
                       <div key={row.id} className={`editor-row${hasPendingChange ? ' editor-row-pending' : ''}`}>
@@ -1302,7 +1610,7 @@ export default function App() {
                             onChange={(event) => updateRateRow(row.id, { currencyCode: event.target.value })}
                           >
                             <option value="">Select</option>
-                            {currencyOptions.map((currency) => (
+                            {availableCurrencies.map((currency) => (
                               <option key={currency} value={currency}>
                                 {currency}
                               </option>

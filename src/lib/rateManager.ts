@@ -27,6 +27,10 @@ export function rateInputToPreciseUnits(rateInput: string) {
   return parseUnits(rateInput || '0', 18);
 }
 
+export function usdcInputToBaseUnits(amount: string) {
+  return parseUnits(amount || '0', 6);
+}
+
 export function applyMarkupPercentToRate(rateInput: string, markupPercent: string) {
   const baseRate = rateInputToPreciseUnits(rateInput || '0');
   const markupWad = percentToWad(markupPercent || '0');

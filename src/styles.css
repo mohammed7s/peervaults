@@ -502,6 +502,10 @@ dt {
   flex: 1 1 0;
 }
 
+.create-vault-grid {
+  align-items: stretch;
+}
+
 .vault-selector {
   min-width: 220px;
 }
