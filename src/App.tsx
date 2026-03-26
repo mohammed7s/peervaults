@@ -54,7 +54,7 @@ type TxResult = {
   label: string;
 };
 
-type PaymentMethodKey = keyof typeof PLATFORM_METADATA;
+type PaymentMethodKey = string;
 type DiscoveredVault = {
   rateManagerId: Hex;
   rateManagerAddress?: Address | null;
@@ -112,17 +112,45 @@ const RATE_MANAGER_CREATED_ABI = parseAbi([
   'event RateManagerCreated(bytes32 indexed rateManagerId, address indexed manager, address indexed feeRecipient, uint256 maxFee, uint256 fee, string name, string uri)',
 ]);
 
-const paymentOptions = Object.entries(PLATFORM_METADATA)
-  .filter(([key]) => {
-    const catalog = getPaymentMethodsCatalog(base.id, appConfig.runtimeEnv);
-    return Boolean(catalog[key.toLowerCase()]);
-  })
-  .map(([key, value]) => ({ key: key as PaymentMethodKey, label: value.displayName }))
-  .sort((a, b) => a.label.localeCompare(b.label));
 const paymentMethodCatalog = getPaymentMethodsCatalog(base.id, appConfig.runtimeEnv);
+const zelleVariantLabels: Record<string, string> = {
+  bofa: 'Bank of America',
+  chase: 'Chase',
+  citi: 'Citi',
+};
+
+function formatPaymentMethodKey(key: string) {
+  return key
+    .split('-')
+    .filter(Boolean)
+    .map((segment) => {
+      if (segment.length <= 3) return segment.toUpperCase();
+      return `${segment[0].toUpperCase()}${segment.slice(1)}`;
+    })
+    .join(' ');
+}
+
+function getPaymentMethodDisplayName(paymentMethod: PaymentMethodKey | '') {
+  if (!paymentMethod) return '';
+
+  const normalizedPaymentMethod = paymentMethod.toLowerCase();
+  const metadata = PLATFORM_METADATA[normalizedPaymentMethod as keyof typeof PLATFORM_METADATA];
+  if (metadata?.displayName) return metadata.displayName;
+
+  if (normalizedPaymentMethod === 'alipay') return 'Alipay';
+  if (normalizedPaymentMethod.startsWith('zelle-')) {
+    const variant = normalizedPaymentMethod.slice('zelle-'.length);
+    return `Zelle (${zelleVariantLabels[variant] ?? formatPaymentMethodKey(variant)})`;
+  }
+
+  return formatPaymentMethodKey(normalizedPaymentMethod);
+}
+
+const paymentOptions = Object.keys(paymentMethodCatalog)
+  .map((key) => ({ key: key as PaymentMethodKey, label: getPaymentMethodDisplayName(key) }))
+  .sort((a, b) => a.label.localeCompare(b.label));
 const allowedCurrenciesByPaymentMethod = Object.fromEntries(
   Object.entries(paymentMethodCatalog)
-    .filter(([key]) => key in PLATFORM_METADATA)
     .map(([key, value]) => [
       key as PaymentMethodKey,
       (value.currencies ?? [])
@@ -512,8 +540,8 @@ export default function App() {
         })
         .filter((row): row is RateEditorRow => Boolean(row))
         .sort((a, b) => {
-          const aLabel = a.paymentMethod ? PLATFORM_METADATA[a.paymentMethod].displayName : '';
-          const bLabel = b.paymentMethod ? PLATFORM_METADATA[b.paymentMethod].displayName : '';
+          const aLabel = getPaymentMethodDisplayName(a.paymentMethod);
+          const bLabel = getPaymentMethodDisplayName(b.paymentMethod);
           const paymentSort = aLabel.localeCompare(bLabel);
           if (paymentSort !== 0) return paymentSort;
           return a.currencyCode.localeCompare(b.currencyCode);
@@ -552,7 +580,7 @@ export default function App() {
       }
 
       if (!isAllowedRoute(row.paymentMethod, row.currencyCode)) {
-        return `${PLATFORM_METADATA[row.paymentMethod].displayName} does not support ${row.currencyCode} on Peer.xyz.`;
+        return `${getPaymentMethodDisplayName(row.paymentMethod)} does not support ${row.currencyCode} on Peer.xyz.`;
       }
 
       const key = `${row.paymentMethod}:${row.currencyCode}`;
@@ -693,8 +721,8 @@ export default function App() {
         })
         .filter((row): row is RateEditorRow => Boolean(row))
         .sort((a, b) => {
-          const aLabel = a.paymentMethod ? PLATFORM_METADATA[a.paymentMethod].displayName : '';
-          const bLabel = b.paymentMethod ? PLATFORM_METADATA[b.paymentMethod].displayName : '';
+          const aLabel = getPaymentMethodDisplayName(a.paymentMethod);
+          const bLabel = getPaymentMethodDisplayName(b.paymentMethod);
           const paymentSort = aLabel.localeCompare(bLabel);
           if (paymentSort !== 0) return paymentSort;
           return a.currencyCode.localeCompare(b.currencyCode);
@@ -954,7 +982,7 @@ export default function App() {
 
         return {
           hash,
-          label: row.paymentMethod ? `${PLATFORM_METADATA[row.paymentMethod].displayName} / ${row.currencyCode} saved` : 'Rate saved',
+          label: row.paymentMethod ? `${getPaymentMethodDisplayName(row.paymentMethod)} / ${row.currencyCode} saved` : 'Rate saved',
         };
       }
 
