@@ -10,6 +10,7 @@
     "create:vault": "tsx scripts/create-vault.ts"
   },
   "dependencies": {
+    "@netlify/blobs": "^10.7.4",
     "@tanstack/query-core": "^5.62.7",
     "@tanstack/react-query": "^5.62.7",
     "@zkp2p/sdk": "^0.2.3",

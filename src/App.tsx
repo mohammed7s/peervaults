@@ -31,6 +31,7 @@ import {
   rateInputToPreciseUnits,
   usdcInputToBaseUnits,
 } from './lib/rateManager';
+import { fetchVaultMarkups, saveVaultMarkupsRemote } from './lib/vaultMarkups';
 
 type VaultConfig = {
   manager: Address;
@@ -289,6 +290,28 @@ function saveVaultMarkups(vaultId: string, markups: VaultMarkupMap) {
   window.localStorage.setItem(getVaultMarkupStorageKey(vaultId), JSON.stringify(markups));
 }
 
+function sortMarkupEntries(markups: VaultMarkupMap) {
+  return Object.fromEntries(Object.entries(markups).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function mergeVaultMarkups(primary: VaultMarkupMap, fallback: VaultMarkupMap) {
+  return sortMarkupEntries({
+    ...fallback,
+    ...primary,
+  });
+}
+
+function collectPersistedMarkups(rows: RateEditorRow[]) {
+  return sortMarkupEntries(
+    rows.reduce<VaultMarkupMap>((accumulator, row) => {
+      if (!row.paymentMethod || !row.currencyCode) return accumulator;
+
+      accumulator[getRateRouteKey(row.paymentMethod, row.currencyCode)] = row.markupPercentInput || '0';
+      return accumulator;
+    }, {}),
+  );
+}
+
 export default function App() {
   const queryClient = useQueryClient();
   const publicClient = usePublicClient({ chainId: base.id });
@@ -389,6 +412,14 @@ export default function App() {
       client!.indexer.getRateManagerDetail(activeVaultId as Hex, {
         rateManagerAddress: activeRateManagerAddress,
       }),
+  });
+
+  const vaultMarkupsQuery = useQuery({
+    queryKey: ['vault-markups', activeVaultId],
+    enabled: Boolean(activeVaultId),
+    queryFn: async () => fetchVaultMarkups(activeVaultId as Hex),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   });
 
   const marketRatesQuery = useQuery({
@@ -504,10 +535,21 @@ export default function App() {
   }, [vaultConfigQuery.data]);
 
   useEffect(() => {
+    if (!activeVaultId || !vaultMarkupsQuery.data) return;
+    saveVaultMarkups(activeVaultId, vaultMarkupsQuery.data.markups);
+  }, [activeVaultId, vaultMarkupsQuery.data]);
+
+  useEffect(() => {
     const rates = vaultDetailQuery.data?.rates ?? [];
-    const persistedMarkups = activeVaultId ? loadVaultMarkups(activeVaultId) : {};
+    const persistedMarkups = activeVaultId
+      ? mergeVaultMarkups(vaultMarkupsQuery.data?.markups ?? {}, loadVaultMarkups(activeVaultId))
+      : {};
     if (!activeVaultId) {
       setRateRows([createRateRow({ currencyCode: defaultCurrency })]);
+      return;
+    }
+
+    if (vaultMarkupsQuery.isPending) {
       return;
     }
 
@@ -547,7 +589,7 @@ export default function App() {
           return a.currencyCode.localeCompare(b.currencyCode);
         }),
     );
-  }, [activeVaultId, vaultDetailQuery.data?.rates]);
+  }, [activeVaultId, vaultDetailQuery.data?.rates, vaultMarkupsQuery.data, vaultMarkupsQuery.isPending]);
 
   const connectedIsManager = Boolean(
     address &&
@@ -607,30 +649,29 @@ export default function App() {
 
     await publicClient.waitForTransactionReceipt({ hash });
 
+    let remotePersistenceWarning = '';
+
     if (activeVaultId) {
-      const nextMarkups = rateRows.reduce<VaultMarkupMap>((accumulator, row) => {
-        if (!row.paymentMethod || !row.currencyCode) return accumulator;
-
-        try {
-          if (rateInputToPreciseUnits(row.rateInput) === 0n) {
-            return accumulator;
-          }
-        } catch {
-          return accumulator;
-        }
-
-        accumulator[getRateRouteKey(row.paymentMethod, row.currencyCode)] = row.markupPercentInput || '0';
-        return accumulator;
-      }, {});
+      const nextMarkups = collectPersistedMarkups(rateRows);
 
       saveVaultMarkups(activeVaultId, nextMarkups);
+
+      try {
+        await saveVaultMarkupsRemote(activeVaultId, nextMarkups);
+      } catch (error) {
+        remotePersistenceWarning =
+          error instanceof Error
+            ? ` Saved onchain, but could not persist markups remotely: ${error.message}`
+            : ' Saved onchain, but could not persist markups remotely.';
+      }
     }
 
     startTransition(() => {
       void queryClient.invalidateQueries({ queryKey: ['vault-config', activeVaultId] });
       void queryClient.invalidateQueries({ queryKey: ['vault-detail', activeVaultId] });
+      void queryClient.invalidateQueries({ queryKey: ['vault-markups', activeVaultId] });
       void queryClient.invalidateQueries({ queryKey: ['vaults-by-manager', address, appConfig.runtimeEnv] });
-      setTxMessage(`${label}: ${hash}`);
+      setTxMessage(`${label}: ${hash}.${remotePersistenceWarning}`);
     });
   }
 
@@ -689,7 +730,9 @@ export default function App() {
 
   function discardRateChanges() {
     const rates = vaultDetailQuery.data?.rates ?? [];
-    const persistedMarkups = activeVaultId ? loadVaultMarkups(activeVaultId) : {};
+    const persistedMarkups = activeVaultId
+      ? mergeVaultMarkups(vaultMarkupsQuery.data?.markups ?? {}, loadVaultMarkups(activeVaultId))
+      : {};
 
     if (!activeVaultId || rates.length === 0) {
       setRateRows([createRateRow({ currencyCode: defaultCurrency })]);
