@@ -1137,6 +1137,9 @@ export default function App() {
           <img src={peerVaultsLogo} alt="Peer Vaults" className="brand-logo" />
         </div>
         <div className="header-actions">
+          <a href="#analytics" className="button button-secondary button-compact" style={{ textDecoration: 'none' }}>
+            Analytics
+          </a>
           {isConnected ? (
             <>
               <span className="wallet-chip">{shortHex(address)}</span>
