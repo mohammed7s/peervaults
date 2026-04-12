@@ -125,10 +125,19 @@ function formatMethodKey(key: string) {
 }
 
 function resolvePaymentMethod(hash: string) {
-  return paymentMethodLabels.get(hash.toLowerCase()) ?? hash.slice(0, 10);
+  if (!hash) return '';
+  const found = paymentMethodLabels.get(hash.toLowerCase());
+  if (found) return found;
+  // if it's not a hash, try looking up as a key directly
+  const meta = PLATFORM_METADATA[hash.toLowerCase() as keyof typeof PLATFORM_METADATA];
+  if (meta?.displayName) return meta.displayName;
+  return hash.startsWith('0x') ? hash.slice(0, 10) : formatMethodKey(hash);
 }
 
 function resolveCurrency(hash: string) {
+  if (!hash) return '';
+  // if it's already a readable code (e.g. "USD"), return as-is
+  if (!hash.startsWith('0x')) return hash;
   return getCurrencyCodeFromHash(hash) ?? hash.slice(0, 10);
 }
 
@@ -845,9 +854,23 @@ export default function Analytics() {
           <div>
             <p className="eyebrow">Returns</p>
             <h2>Vault APR</h2>
-            <p className="muted" style={{ marginTop: 6 }}>
-              APR = (realized PnL / gross delegated) x (365 / days). Gross delegated = total capital ever committed to the vault.
-            </p>
+            <div className="apr-formula-inline">
+              <span className="formula-block" style={{ justifyContent: 'flex-start' }}>
+                <span style={{ color: 'var(--muted)', marginRight: 8 }}>APR =</span>
+                <span className="formula-frac">
+                  <span className="formula-num">Realized PnL</span>
+                  <span className="formula-den">Gross Delegated</span>
+                </span>
+                <span className="formula-op">&times;</span>
+                <span className="formula-frac">
+                  <span className="formula-num">365</span>
+                  <span className="formula-den">Days Active</span>
+                </span>
+              </span>
+              <p className="muted" style={{ fontSize: '0.76rem', marginTop: 4 }}>
+                Gross Delegated = total capital ever committed to the vault. Idle time naturally reduces APR.
+              </p>
+            </div>
           </div>
           <div className="section-actions">
             <div className="apr-toggle">
@@ -875,8 +898,8 @@ export default function Analytics() {
                 { key: 'volume', label: 'Volume' },
                 { key: 'pnl', label: 'PnL' },
                 { key: 'orders', label: 'Orders' },
-                { key: 'turnover', label: 'Turnover' },
-                { key: 'apr', label: 'APR', align: 'right' as const, hasInfo: true },
+                { key: 'turnover', label: 'Turnover', hasInfo: 'turnover' as const },
+                { key: 'apr', label: 'APR', align: 'right' as const, hasInfo: 'apr' as const },
               ].map((col) => (
                 <span
                   key={col.key}
@@ -892,19 +915,32 @@ export default function Analytics() {
                     >
                       ?
                       <span className="formula-tooltip">
-                        <span className="formula-title">APR</span>
-                        <span className="formula-block">
-                          <span className="formula-frac">
-                            <span className="formula-num">Realized PnL</span>
-                            <span className="formula-den">Gross Delegated</span>
-                          </span>
-                          <span className="formula-op">&times;</span>
-                          <span className="formula-frac">
-                            <span className="formula-num">365</span>
-                            <span className="formula-den">Days</span>
-                          </span>
-                        </span>
-                        <span className="formula-note">Gross Delegated = total capital ever committed (remaining + outstanding + taken + withdrawn). Penalizes idle time and slow turnover.</span>
+                        {col.hasInfo === 'apr' && (
+                          <>
+                            <span className="formula-title">APR</span>
+                            <span className="formula-block">
+                              <span className="formula-frac">
+                                <span className="formula-num">Realized PnL</span>
+                                <span className="formula-den">Gross Delegated</span>
+                              </span>
+                              <span className="formula-op">&times;</span>
+                              <span className="formula-frac">
+                                <span className="formula-num">365</span>
+                                <span className="formula-den">Days Active</span>
+                              </span>
+                            </span>
+                            <span className="formula-note">Gross Delegated = total capital ever committed. Accounts for idle time and slow turnover.</span>
+                          </>
+                        )}
+                        {col.hasInfo === 'turnover' && (
+                          <>
+                            <span className="formula-title">Median Turnover</span>
+                            <span className="formula-note" style={{ textAlign: 'left' }}>
+                              Average time from when a deposit is delegated to this vault until it receives its first fill.
+                              Faster turnover means your capital gets put to work sooner.
+                            </span>
+                          </>
+                        )}
                       </span>
                     </span>
                   )}

@@ -892,6 +892,14 @@ dt {
   line-height: 1.4;
 }
 
+.apr-formula-inline {
+  margin-top: 8px;
+}
+
+.apr-formula-inline .formula-block {
+  padding: 0;
+}
+
 /* Delegator summary line */
 .delegator-summary {
   font-size: 0.9rem;
